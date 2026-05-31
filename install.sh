@@ -21,8 +21,9 @@ echo ""
 echo "Checking dependencies..."
 if ! dpkg -l | grep -q python3-setuptools; then
     echo "Installing python3-setuptools..."
-    sudo apt update
-    sudo apt install -y python3-setuptools
+    sudo apt-get update
+    sudo apt-get install -y python3-setuptools
+    sudo apt-get install -y python-is-python3    
 else
     echo "✓ python3-setuptools already installed"
 fi
