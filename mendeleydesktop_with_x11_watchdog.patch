@@ -1,0 +1,155 @@
+--- mendeleydesktop.original	2026-11-26 10:54:50.826579116 +0100
++++ mendeleydesktop	2026-11-26 11:59:17.884086535 +0100
+@@ -1,11 +1,64 @@
+ #!/usr/bin/env python
+ 
+ from __future__ import print_function
+-import distutils.version
++try:
++    import distutils.version
++except ImportError:
++    # distutils was removed in Python 3.12, use packaging as fallback
++    try:
++        from packaging import version as distutils_version
++        class version:
++            class StrictVersion:
++                def __init__(self, vstring):
++                    self.version = distutils_version.parse(vstring)
++                def __cmp__(self, other):
++                    if self.version < other.version:
++                        return -1
++                    elif self.version > other.version:
++                        return 1
++                    return 0
++                def __lt__(self, other):
++                    return self.version < other.version
++                def __le__(self, other):
++                    return self.version <= other.version
++                def __gt__(self, other):
++                    return self.version > other.version
++                def __ge__(self, other):
++                    return self.version >= other.version
++                def __eq__(self, other):
++                    return self.version == other.version
++        distutils = type('distutils', (), {'version': version})()
++    except ImportError:
++        # If packaging is also not available, create a minimal implementation
++        class version:
++            class StrictVersion:
++                def __init__(self, vstring):
++                    self.vstring = vstring
++                    self.version = tuple(map(int, vstring.split('.')))
++                def __cmp__(self, other):
++                    if self.version < other.version:
++                        return -1
++                    elif self.version > other.version:
++                        return 1
++                    return 0
++                def __lt__(self, other):
++                    return self.version < other.version
++                def __le__(self, other):
++                    return self.version <= other.version
++                def __gt__(self, other):
++                    return self.version > other.version
++                def __ge__(self, other):
++                    return self.version >= other.version
++                def __eq__(self, other):
++                    return self.version == other.version
++        distutils = type('distutils', (), {'version': version})()
+ import os
+ import platform
++import re
++import signal
+ import subprocess
+ import sys
++import time
+ 
+ def library_paths():
+     """ Returns a list of paths where libraries can be found: LD_LIBRARY_PATH followed by
+@@ -219,6 +272,76 @@
+ 
+     print("")
+ 
++def x11_window_belongs_to_process(window_id, pid):
++    """Return whether an X11 window belongs to pid."""
++    try:
++        output = subprocess.check_output(
++            ["xprop", "-id", window_id, "_NET_WM_PID"],
++            stderr=subprocess.STDOUT,
++            universal_newlines=True)
++    except (OSError, subprocess.CalledProcessError):
++        return False
++
++    match = re.search(r"_NET_WM_PID\(CARDINAL\).*?(\d+)", output)
++    return match is not None and int(match.group(1)) == pid
++
++def x11_has_process_window(pid):
++    """Return True/False for an X11 window owned by pid, or None if unavailable."""
++    try:
++        output = subprocess.check_output(
++            ["xprop", "-root", "_NET_CLIENT_LIST"],
++            stderr=subprocess.STDOUT,
++            universal_newlines=True)
++    except (OSError, subprocess.CalledProcessError):
++        return None
++
++    window_ids = re.findall(r"0x[0-9a-fA-F]+", output)
++    return any(x11_window_belongs_to_process(window_id, pid)
++               for window_id in window_ids)
++
++def terminate_process_group(process):
++    """Terminate the native application and its children."""
++    if process.poll() is not None:
++        return
++
++    try:
++        os.killpg(process.pid, signal.SIGTERM)
++    except ProcessLookupError:
++        return
++
++    deadline = time.time() + 5
++    while process.poll() is None and time.time() < deadline:
++        time.sleep(0.1)
++
++    if process.poll() is None:
++        os.killpg(process.pid, signal.SIGKILL)
++
++def run_mendeley_with_x11_watchdog(args):
++    """Run Mendeley and stop it when its last X11 window disappears."""
++    process = subprocess.Popen(args, start_new_session=True)
++    window_seen = False
++    missing_since = None
++
++    try:
++        while process.poll() is None:
++            has_window = x11_has_process_window(process.pid)
++
++            if has_window is True:
++                window_seen = True
++                missing_since = None
++            elif has_window is False and window_seen:
++                if missing_since is None:
++                    missing_since = time.time()
++                elif time.time() - missing_since >= 2:
++                    terminate_process_group(process)
++                    break
++
++            time.sleep(0.5)
++    except KeyboardInterrupt:
++        terminate_process_group(process)
++
++    return process.wait()
++
+ def launch_mendeley_desktop():
+     sanity_checks()
+     set_environment()
+@@ -233,8 +356,7 @@
+ 
+         args = mendeley_desktop_arguments()
+ 
+-        # Runs main Mendeley Desktop application.
+-        result = subprocess.call(args)
++        result = run_mendeley_with_x11_watchdog(args)
+         sys.exit(result)
+ 
+     except OSError:
